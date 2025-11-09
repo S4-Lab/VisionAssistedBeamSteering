@@ -1,132 +1,229 @@
-import cv2
-import os
-import random
+#!/usr/bin/env python3
+from pathlib import Path
+import csv, random, shutil
 import numpy as np
-import matplotlib.pyplot as plt
-import csv
+import cv2
 
-# -----------------------------
-# Parameters
-# -----------------------------
-num_per_bg = 5
-target_size = 256
-csv_file = "/Users/research/PycharmProjects/PhDProjects/RadarProcessingProject/dataset/syntheticdata/metadata.csv"
+# ==============================
+# Paths (relative to this file)
+# ==============================
+BASE        = Path(__file__).parent.resolve()
+DATASET_DIR = BASE / "dataset"
+BG_DIR      = DATASET_DIR / "croppeddata"
+BALL_DIR    = DATASET_DIR / "ball"
+OUT_DIR     = DATASET_DIR / "syntheticdata"
+IMAGES_DIR  = OUT_DIR / "images"
+CSV_PATH    = OUT_DIR / "labels.csv"   # matches the viewer
 
-save_dir = "/Users/research/PycharmProjects/PhDProjects/RadarProcessingProject/dataset/syntheticdata"
-background_dir = "/Users/research/PycharmProjects/PhDProjects/RadarProcessingProject/dataset/croppeddata"
-ball_dir = "/Users/research/PycharmProjects/PhDProjects/RadarProcessingProject/dataset/ball"
+# ==============================
+# Controls
+# ==============================
+TOTAL_IMAGES   = 10000       # total images to generate (mixed positives + negatives)
+NEGATIVE_PROB  = 0.10      # per-image probability of generating a background-only (no ball)
+TARGET_SIZE    = 256       # base size used to draw random ball scales
+SCALE_RANGE    = (0.1, 0.5)# ball size as a fraction of TARGET_SIZE
+RANDOM_SEED    = 42        # set to None for non-deterministic runs
+MAX_POS_TRIES  = 20        # per-image retry budget when a positive attempt fails (e.g., ball too big)
+SHOW_PREVIEW   = False     # set True for a small sanity-check figure at the end
 
-os.makedirs(save_dir, exist_ok=True)
-metadata = []
+# ==============================
+# Prep & clean
+# ==============================
+if RANDOM_SEED is not None:
+    random.seed(RANDOM_SEED)
 
-# -----------------------------
-# Load images
-# -----------------------------
-backgrounds = [cv2.imread(os.path.join(background_dir, f)) for f in os.listdir(background_dir)]
-balls = [cv2.imread(os.path.join(ball_dir, f), cv2.IMREAD_UNCHANGED) for f in os.listdir(ball_dir)]
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-# -----------------------------
-# Generate synthetic images
-# -----------------------------
-for i, bg in enumerate(backgrounds):
-    if bg is None:
-        continue
+# Purge old images
+for p in IMAGES_DIR.iterdir():
+    if p.is_file():
+        p.unlink()
+    elif p.is_dir():
+        shutil.rmtree(p)
 
+# ==============================
+# Helpers
+# ==============================
+def list_images_with_paths(folder: Path):
+    """Return list of (path, image) with IMREAD_UNCHANGED (keep alpha)."""
+    items = []
+    for p in sorted(folder.iterdir()):
+        if not p.is_file():
+            continue
+        img = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+        if img is not None:
+            items.append((p, img))
+    return items
+
+def ensure_bgra(img):
+    """Return image as BGRA (adds alpha=255 if absent)."""
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+    elif img.shape[2] == 3:
+        b, g, r = cv2.split(img)
+        a = np.full_like(b, 255)
+        img = cv2.merge((b, g, r, a))
+    elif img.shape[2] == 4:
+        pass
+    else:
+        raise ValueError("Unsupported channel count.")
+    return img
+
+def to_bgr(img):
+    """Ensure 3-channel BGR background."""
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
+
+def try_make_positive(backgrounds, balls):
+    """
+    Attempt to compose a single positive (ball present) image.
+    Returns (img, x_center, y_center, width, bg_name, ball_name) or None if fail.
+    """
+    bg_path, bg_raw = random.choice(backgrounds)
+    ball_path, ball0 = random.choice(balls)
+
+    bg = to_bgr(bg_raw)
     h_bg, w_bg, _ = bg.shape
 
-    for j in range(num_per_bg):
-        img = bg.copy()
+    ball = ensure_bgra(ball0)
 
-        # Pick a random ball
-        ball = random.choice(balls)
-        if ball is None:
-            continue
+    # Resize ball randomly
+    scale = random.uniform(*SCALE_RANGE)
+    new_w = max(1, int(TARGET_SIZE * scale))
+    new_h = max(1, int(TARGET_SIZE * scale))
+    ball_resized = cv2.resize(ball, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        # Resize ball randomly
-        scale = random.uniform(0.1, 0.5)
-        new_w = int(target_size * scale)
-        new_h = int(target_size * scale)
-        ball_resized = cv2.resize(ball, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    # Visible region from alpha
+    alpha = ball_resized[:, :, 3]
+    coords = np.column_stack(np.where(alpha > 0))
+    if coords.size == 0:
+        return None  # fully transparent after resize
 
-        # Extract alpha channel
-        alpha = ball_resized[:, :, 3]
-        coords = np.column_stack(np.where(alpha > 0))
-        if coords.size == 0:
-            continue  # skip fully transparent ball
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    ball_w = int(x_max - x_min + 1)
+    ball_h = int(y_max - y_min + 1)
 
-        y_min, x_min = coords.min(axis=0)
-        y_max, x_max = coords.max(axis=0)
-        ball_w = x_max - x_min + 1
-        ball_h = y_max - y_min + 1
+    # Skip if visible ball patch is larger than the background
+    if ball_w > w_bg or ball_h > h_bg:
+        return None
 
-        # Random position on the background, fully visible
-        x_bg = random.randint(0, w_bg - ball_w)
-        y_bg = random.randint(0, h_bg - ball_h)
+    # Random top-left on the background, fully visible
+    x_bg = random.randint(0, w_bg - ball_w)
+    y_bg = random.randint(0, h_bg - ball_h)
 
-        # Overlay the visible part of the ball
-        for c in range(3):
-            alpha_channel = alpha[y_min:y_max+1, x_min:x_max+1] / 255.0
-            img[y_bg:y_bg+ball_h, x_bg:x_bg+ball_w, c] = (
-                alpha_channel * ball_resized[y_min:y_max+1, x_min:x_max+1, c] +
-                (1 - alpha_channel) * img[y_bg:y_bg+ball_h, x_bg:x_bg+ball_w, c]
-            )
+    # Compose
+    img = bg.copy()
+    alpha_vis = alpha[y_min:y_max+1, x_min:x_max+1].astype(np.float32) / 255.0
+    for c in range(3):
+        src = ball_resized[y_min:y_max+1, x_min:x_max+1, c].astype(np.float32)
+        dst = img[y_bg:y_bg+ball_h, x_bg:x_bg+ball_w, c].astype(np.float32)
+        img[y_bg:y_bg+ball_h, x_bg:x_bg+ball_w, c] = alpha_vis * src + (1.0 - alpha_vis) * dst
 
-        # Save the image
-        filename = f"synthetic_{i}_{j}.jpg"
-        cv2.imwrite(os.path.join(save_dir, filename), img)
+    # Square bounding box centered on visible region
+    x_center = x_bg + ball_w / 2.0
+    y_center = y_bg + ball_h / 2.0
+    box_width = float(max(ball_w, ball_h))
 
-        # Compute bounding box centered on visible ball
-        x_center = x_bg + ball_w / 2
-        y_center = y_bg + ball_h / 2
-        box_width = max(ball_w, ball_h)  # square box
+    return img, x_center, y_center, box_width, bg_path.name, ball_path.name
 
-        metadata.append({
-            "filename": filename,
-            "bbox": [1.0, x_center, y_center, box_width]
-        })
+# ==============================
+# Load sources
+# ==============================
+backgrounds = list_images_with_paths(BG_DIR)  # [(path, img), ...]
+balls       = list_images_with_paths(BALL_DIR)
 
-    # Save background image as negative example
-    filename = f"background_{i}_{j}.jpg"
-    cv2.imwrite(os.path.join(save_dir, filename), bg)
-    metadata.append({
-        "filename": filename,
-        "bbox": [0, 0, 0, 0]
-    })
+if not backgrounds:
+    raise RuntimeError(f"No readable background images in: {BG_DIR}")
+if not balls:
+    raise RuntimeError(f"No readable ball images in: {BALL_DIR}")
 
-# -----------------------------
-# Save CSV
-# -----------------------------
-with open(csv_file, mode="w", newline="") as f:
+# ==============================
+# Generate mixed set
+# ==============================
+metadata = []  # [filename, p_ball, x_center, y_center, width, background file, ball file]
+seq = 0
+num_pos = 0
+num_neg = 0
+
+for _ in range(TOTAL_IMAGES):
+    make_negative = (random.random() < NEGATIVE_PROB)
+
+    if make_negative:
+        # negative: pick a background only
+        bg_path, bg_raw = random.choice(backgrounds)
+        bg = to_bgr(bg_raw)
+        filename = f"synthetic_{seq:06d}.jpg"
+        cv2.imwrite(str(IMAGES_DIR / filename), bg)
+        metadata.append([filename, 0, 0, 0, 0, bg_path.name, ""])
+        seq += 1
+        num_neg += 1
+        continue
+
+    # positive: try a few times, else fallback to a negative to keep total count constant
+    success = None
+    for _try in range(MAX_POS_TRIES):
+        success = try_make_positive(backgrounds, balls)
+        if success is not None:
+            break
+
+    if success is None:
+        # fallback negative
+        bg_path, bg_raw = random.choice(backgrounds)
+        bg = to_bgr(bg_raw)
+        filename = f"synthetic_{seq:06d}.jpg"
+        cv2.imwrite(str(IMAGES_DIR / filename), bg)
+        metadata.append([filename, 0, 0, 0, 0, bg_path.name, ""])
+        seq += 1
+        num_neg += 1
+    else:
+        img, x_center, y_center, box_width, bg_name, ball_name = success
+        filename = f"synthetic_{seq:06d}.jpg"
+        cv2.imwrite(str(IMAGES_DIR / filename), img)
+        metadata.append([filename, 1, x_center, y_center, box_width, bg_name, ball_name])
+        seq += 1
+        num_pos += 1
+
+# ==============================
+# Write CSV fresh
+# ==============================
+with open(CSV_PATH, mode="w", newline="") as f:
     writer = csv.writer(f)
-    writer.writerow(["filename", "p_ball", "x_center", "y_center", "width"])
-    for item in metadata:
-        writer.writerow([item["filename"], *item["bbox"]])
+    writer.writerow(["filename", "p_ball", "x_center", "y_center", "width", "background file", "ball file"])
+    writer.writerows(metadata)
 
-# -----------------------------
-# Visualization (sanity check)
-# -----------------------------
-num_samples = 5
-samples = random.sample(metadata, num_samples)
+print(f"Generated {seq} images into {IMAGES_DIR}")
+print(f"Counts -> positives(with balls): {num_pos}, negatives(background-only): {num_neg}")
+print(f"Wrote CSV: {CSV_PATH}")
 
-plt.figure(figsize=(15,5))
-for i, item in enumerate(samples):
-    img_path = os.path.join(save_dir, item["filename"])
-    img = cv2.imread(img_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    ax = plt.subplot(1, num_samples, i+1)
-    ax.imshow(img)
-    ax.axis("off")
-
-    p_ball, x_center, y_center, width = item["bbox"]
-    if p_ball > 0:
-        x1 = int(x_center - width/2)
-        y1 = int(y_center - width/2)
-        rect = plt.Rectangle((x1, y1), width, width,
-                             edgecolor='red', facecolor='none', linewidth=2)
-        ax.add_patch(rect)
-        ax.text(5, 15, f"x:{x_center:.0f}, y:{y_center:.0f}, w:{width:.0f}",
-                color='red', fontsize=9, bbox=dict(facecolor='white', alpha=0.5))
-
-plt.tight_layout()
-plt.show()
+# ==============================
+# Optional preview
+# ==============================
+if SHOW_PREVIEW and seq > 0:
+    import matplotlib.pyplot as plt
+    n = min(5, seq)
+    picks = random.sample(metadata, n)
+    plt.figure(figsize=(15, 5))
+    for i, row in enumerate(picks):
+        fn, p_ball, xc, yc, w, bg_name, ball_name = row
+        img = cv2.imread(str(IMAGES_DIR / fn))
+        if img is None:
+            continue
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        ax = plt.subplot(1, n, i+1)
+        ax.imshow(img)
+        ax.axis("off")
+        if p_ball:
+            x1 = float(xc) - float(w)/2.0
+            y1 = float(yc) - float(w)/2.0
+            rect = plt.Rectangle((x1, y1), float(w), float(w),
+                                 edgecolor='red', facecolor='none', linewidth=2)
+            ax.add_patch(rect)
+            ax.text(5, 15, f"x:{xc:.0f}, y:{yc:.0f}, w:{w:.0f}",
+                    color='red', fontsize=9, bbox=dict(facecolor='white', alpha=0.5))
+    plt.tight_layout()
+    plt.show()
