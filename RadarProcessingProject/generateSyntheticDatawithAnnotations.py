@@ -18,7 +18,7 @@ CSV_PATH    = OUT_DIR / "labels.csv"   # matches the viewer
 # ==============================
 # Controls
 # ==============================
-TOTAL_IMAGES   = 10000       # total images to generate (mixed positives + negatives)
+TOTAL_IMAGES   = 100       # total images to generate (mixed positives + negatives)
 NEGATIVE_PROB  = 0.10      # per-image probability of generating a background-only (no ball)
 TARGET_SIZE    = 256       # base size used to draw random ball scales
 SCALE_RANGE    = (0.1, 0.5)# ball size as a fraction of TARGET_SIZE
