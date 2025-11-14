@@ -1,0 +1,5 @@
+path: C:\Users\jasmi\OneDrive\Documents\Stanford\cs230\VisionAssistedBeamSteering\RadarProcessingProject\work_subset\dataset_sub
+train: images/train
+val: images/val
+names:
+- target

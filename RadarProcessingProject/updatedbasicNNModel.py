@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
+from pathlib import Path
 import os
 from tensorflow.keras import layers, models, Input
 from sklearn.model_selection import train_test_split
@@ -19,9 +20,13 @@ P_BALL_WEIGHT = 5.0  # weight for p_ball loss
 # -----------------------------
 # 2. Load data
 # -----------------------------
-df = pd.read_csv(f"/Users/research/PycharmProjects/PhDProjects/RadarProcessingProject/dataset/syntheticdata/labels.csv")  # must contain: filename, p_ball, x_center, y_center, width
 
-IMAGE_FOLDER = "/Users/research/PycharmProjects/PhDProjects/RadarProcessingProject/dataset/syntheticdata/images"
+BASE        = Path(__file__).parent.resolve()
+CSV_PATH    = BASE / "dataset" / "syntheticdata" / "labels.csv"
+IMAGES_DIR  = BASE / "dataset" / "syntheticdata" / "images"
+
+df = pd.read_csv(CSV_PATH) 
+IMAGE_FOLDER = str(IMAGES_DIR)
 
 def load_and_preprocess(filename):
     full_path = os.path.join(IMAGE_FOLDER, filename)
@@ -175,3 +180,5 @@ print(f"MSE: {mse:.3f}, MAE: {mae:.3f}")
 mae_per_coord = np.mean(np.abs(true_coords - pred_coords), axis=0)
 print(f"MAE per coordinate (x, y, width): {mae_per_coord}")
 
+
+# %%
